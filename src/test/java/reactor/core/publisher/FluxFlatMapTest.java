@@ -26,7 +26,6 @@ import org.junit.Assert;
 import org.junit.Test;
 import org.reactivestreams.Subscriber;
 import reactor.core.Exceptions;
-import reactor.core.MultiProducer;
 import reactor.core.MultiReceiver;
 import reactor.core.Trackable;
 import reactor.core.scheduler.Schedulers;
@@ -482,6 +481,23 @@ public class FluxFlatMapTest {
 	}
 
 	@Test
+	public void failPublisher() {
+		StepVerifier.create(Flux.just(1, 2, 3)
+		                        .flatMap(d -> Flux.error(new Exception("test"))))
+		            .verifyErrorMessage("test");
+	}
+
+	@Test
+	public void failPublisherDelay() {
+		StepVerifier.create(Flux.just(1, 2, 3)
+		                        .flatMap(d -> Flux.error(new Exception("test")),
+				                        true,
+				                        1,
+				                        1))
+		            .verifyErrorMessage("Multiple exceptions");
+	}
+
+	@Test
 	public void failNull() {
 		StepVerifier.create(Flux.just(1, 2, 3)
 		                        .flatMap(d -> null))
@@ -812,6 +828,7 @@ public class FluxFlatMapTest {
 
 	void assertBeforeOnSubscribeState(Trackable s) {
 		assertThat(s.isStarted()).isFalse();
+		assertThat(s.requestedFromDownstream()).isEqualTo(0);
 		assertThat(s.isTerminated()).isFalse();
 		assertThat(s.getCapacity()).isEqualTo(1);
 		assertThat(s.getPending()).isEqualTo(-1);
@@ -820,9 +837,18 @@ public class FluxFlatMapTest {
 		assertThat(s.isCancelled()).isFalse();
 	}
 
+	void assertAfterOnSubscribeState(Trackable s) {
+		assertThat(s.isStarted()).isTrue();
+		assertThat(s.getError()).isNull();
+		assertThat(s.requestedFromDownstream()).isEqualTo(1);
+		assertThat(s.isTerminated()).isFalse();
+		assertThat(s.isCancelled()).isFalse();
+	}
+
 	void assertBeforeOnSubscribeInnerState(Trackable s) {
 		assertThat(s.isStarted()).isFalse();
 		assertThat(s.isTerminated()).isFalse();
+		assertThat(s.requestedFromDownstream()).isEqualTo(-1L);
 		assertThat(s.getCapacity()).isEqualTo(32);
 		assertThat(s.getPending()).isEqualTo(-1);
 		assertThat(s.limit()).isEqualTo(24);
@@ -830,10 +856,14 @@ public class FluxFlatMapTest {
 		assertThat(s.isCancelled()).isFalse();
 	}
 
-	void assertAfterOnSubscribeState(Trackable s) {
-		assertThat(s.isStarted()).isTrue();
-		assertThat(s.isTerminated()).isFalse();
-		assertThat(s.isCancelled()).isFalse();
+	void assertAfterOnNextInnerState(Trackable s) {
+		assertThat(s.getPending()).isEqualTo(-1L);
+	}
+
+	void assertAfterOnCompleteInnerState(Trackable s) {
+		assertThat(s.isStarted()).isFalse();
+		assertThat(s.isTerminated()).isTrue();
+		assertThat(s.getPending()).isEqualTo(-1L);
 	}
 
 	void assertAfterOnSubscribeInnerState(MultiReceiver s) {
@@ -845,20 +875,85 @@ public class FluxFlatMapTest {
 	public void assertOnSubscribeState() {
 		StepVerifier.create(Flux.from(s -> {
 			assertBeforeOnSubscribeState((FluxFlatMap.FlatMapMain) s);
+			assertThat(((FluxFlatMap.FlatMapMain) s).upstream()).isNull();
 			s.onSubscribe(Operators.emptySubscription());
+			assertThat(((FluxFlatMap.FlatMapMain) s).upstream()).isSameAs(Operators.emptySubscription());
 			assertAfterOnSubscribeState((FluxFlatMap.FlatMapMain) s);
 			s.onNext(1);
+			assertThat(((FluxFlatMap.FlatMapMain) s).downstream()).isNotNull();
 			s.onComplete();
 		})
 		                        .flatMap(f -> Flux.from(s -> {
 			                        assertBeforeOnSubscribeInnerState((FluxFlatMap.FlatMapInner) s);
 			                        s.onSubscribe(Operators.emptySubscription());
-			                        assertAfterOnSubscribeState((FluxFlatMap.FlatMapInner) s);
+			                        assertThat(((FluxFlatMap.FlatMapInner) s).upstream()).isEqualTo(
+					                        Operators.emptySubscription());
 			                        assertAfterOnSubscribeInnerState(((FluxFlatMap.FlatMapInner) s).downstream());
 			                        s.onNext(f);
+			                        assertAfterOnNextInnerState(((FluxFlatMap.FlatMapInner) s));
 			                        s.onComplete();
+			                        assertAfterOnCompleteInnerState(((FluxFlatMap.FlatMapInner) s));
 		                        }), 1), 1)
 		            .expectNext(1)
 		            .verifyComplete();
+	}
+
+	@Test
+	public void assertOnSubscribeState2() {
+		StepVerifier.create(Flux.from(s -> {
+			s.onSubscribe(Operators.emptySubscription());
+			assertThat(((FluxFlatMap.FlatMapMain) s).isCancelled()).isEqualTo(true);
+			s.onSubscribe(Operators.emptySubscription());
+			assertThat(((FluxFlatMap.FlatMapMain) s).isCancelled()).isEqualTo(true);
+		})
+		                        .flatMap(Flux::just, 1), 1)
+		            .thenCancel()
+		            .verify();
+	}
+
+	@Test
+	public void ignoreSyncFusedRequest() {
+		StepVerifier.create(Flux.just(1, 2, 3)
+		                        .flatMap(f -> Flux.range(f, 2), 1), 0)
+		            .thenRequest(1)
+		            .thenCancel()
+		            .verify();
+	}
+
+	@Test
+	public void asyncInnerFusion() {
+		UnicastProcessor<Integer> up = UnicastProcessor.create();
+		StepVerifier.create(Flux.just(1)
+		                        .hide()
+		                        .flatMap(f -> up, 1))
+		            .then(() -> up.onNext(1))
+		            .then(() -> up.onNext(2))
+		            .then(() -> up.onNext(3))
+		            .then(() -> up.onNext(4))
+		            .then(() -> up.onComplete())
+		            .expectNext(1, 2, 3, 4)
+		            .verifyComplete();
+	}
+
+	@Test
+	public void failAsyncInnerFusion() {
+		UnicastProcessor<Integer> up = UnicastProcessor.create();
+		StepVerifier.create(Flux.just(1)
+		                        .hide()
+		                        .flatMap(f -> up, 1))
+		            .then(() -> up.onNext(1))
+		            .then(() -> up.onNext(2))
+		            .then(() -> up.onError(new Exception("test")))
+		            .expectNext(1, 2)
+		            .verifyErrorMessage("test");
+	}
+
+	@Test
+	public void failsyncInnerFusion() {
+		StepVerifier.create(Flux.just(1)
+		                        .hide()
+		                        .flatMap(f -> Flux.just(1, 2, null), 1))
+		            .expectNext(1, 2)
+		            .verifyError(NullPointerException.class);
 	}
 }

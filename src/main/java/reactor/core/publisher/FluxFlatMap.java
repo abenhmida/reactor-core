@@ -852,7 +852,7 @@ final class FluxFlatMap<T, R> extends FluxSource<T, R> {
 
 		@Override
 		public boolean isTerminated() {
-			return done && get().length == 0;
+			return done && (scalarQueue == null || scalarQueue.isEmpty());
 		}
 
 		@Override
@@ -971,15 +971,13 @@ final class FluxFlatMap<T, R> extends FluxSource<T, R> {
 
 		@Override
 		public void request(long n) {
-			if (sourceMode != Fuseable.SYNC) {
-				long p = produced + n;
-				if (p >= limit) {
-					produced = 0L;
-					s.request(p);
-				}
-				else {
-					produced = p;
-				}
+			long p = produced + n;
+			if (p >= limit) {
+				produced = 0L;
+				s.request(p);
+			}
+			else {
+				produced = p;
 			}
 		}
 
@@ -1010,7 +1008,7 @@ final class FluxFlatMap<T, R> extends FluxSource<T, R> {
 
 		@Override
 		public boolean isTerminated() {
-			return done && queue.isEmpty();
+			return done && (queue == null || queue.isEmpty());
 		}
 
 		@Override
