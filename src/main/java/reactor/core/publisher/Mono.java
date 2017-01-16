@@ -193,8 +193,12 @@ public abstract class Mono<T> implements Publisher<T> {
 	 *
 	 * @return a new {@link Mono}
 	 */
+	@Deprecated
 	public static Mono<Long> delay(Duration duration) {
-		return delayMillis(duration.toMillis());
+		return delayElement(duration);
+	}
+	public static Mono<Long> delayElement(Duration duration) {
+		return delayElementMillis(duration.toMillis());
 	}
 
 	/**
@@ -208,8 +212,12 @@ public abstract class Mono<T> implements Publisher<T> {
 	 *
 	 * @return a new {@link Mono}
 	 */
+	@Deprecated
 	public static Mono<Long> delayMillis(long duration) {
-		return delayMillis(duration, Schedulers.timer());
+		return delayElementMillis(duration);
+	}
+	public static Mono<Long> delayElementMillis(long duration) {
+		return delayElementMillis(duration, Schedulers.timer());
 	}
 
 	/**
@@ -224,7 +232,11 @@ public abstract class Mono<T> implements Publisher<T> {
 	 *
 	 * @return a new {@link Mono}
 	 */
+	@Deprecated
 	public static Mono<Long> delayMillis(long duration, TimedScheduler timer) {
+		return delayElementMillis(duration , timer);
+	}
+	public static Mono<Long> delayElementMillis(long duration, TimedScheduler timer) {
 		return onAssembly(new MonoDelay(duration, TimeUnit.MILLISECONDS, timer));
 	}
 
