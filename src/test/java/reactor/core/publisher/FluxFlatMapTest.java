@@ -630,6 +630,16 @@ public class FluxFlatMapTest {
 		}).flatMap(Flux::just))
 		            .verifyComplete();
 	}
+@Test
+	public void ignoreDoubleOnSubscribeInner() {
+		StepVerifier.create(Flux.empty().hide()
+		                        .flatMap(f -> Flux.from(s -> {
+			                        s.onSubscribe(Operators.emptySubscription());
+			                        s.onSubscribe(Operators.emptySubscription());
+			                        s.onComplete();
+		                        })))
+		            .verifyComplete();
+	}
 
 	@Test //FIXME use Violation.NO_CLEANUP_ON_TERMINATE
 	public void failDoubleError() {
