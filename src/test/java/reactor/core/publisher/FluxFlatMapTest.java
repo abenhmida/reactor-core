@@ -15,18 +15,21 @@
  */
 package reactor.core.publisher;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.Assert;
 import org.junit.Test;
 import org.reactivestreams.Subscriber;
-import org.reactivestreams.Subscription;
 import reactor.core.Exceptions;
+import reactor.core.MultiProducer;
+import reactor.core.MultiReceiver;
+import reactor.core.Trackable;
+import reactor.core.scheduler.Schedulers;
 import reactor.test.StepVerifier;
 import reactor.test.publisher.TestPublisher;
 import reactor.test.subscriber.AssertSubscriber;
@@ -552,8 +555,12 @@ public class FluxFlatMapTest {
 
 	@Test
 	public void prematureCancel2() {
-		StepVerifier.create(Flux.just(1, 2, 3)
-		                        .flatMap(Flux::just))
+		StepVerifier.create(Flux.range(1, 10000)
+		                        .flatMap(Flux::just, 2)
+		                        .cancelOn(Schedulers.single()), 3)
+		            .expectNext(1)
+		            .thenRequest(2)
+		            .expectNext(2)
 		            .thenCancel()
 		            .verify();
 	}
@@ -648,6 +655,18 @@ public class FluxFlatMapTest {
 
 		StepVerifier.create(ts.flux()
 		                      .flatMap(Flux::just, 1), 0)
+		            .then(() -> ts.emit(1, 2))
+		            .verifyErrorMatches(Exceptions::isOverflow);
+	}
+
+	@Test
+	public void failOverflow() {
+		TestPublisher<Integer> ts =
+				TestPublisher.createNoncompliant(TestPublisher.Violation.REQUEST_OVERFLOW);
+
+		StepVerifier.create(Flux.just(1)
+		                        .hide()
+		                        .flatMap(f -> ts, 2, 1), 0)
 		            .then(() -> ts.emit(1, 2))
 		            .verifyErrorMatches(Exceptions::isOverflow);
 	}
@@ -771,178 +790,75 @@ public class FluxFlatMapTest {
 	                .verify();
 	}
 
-	@Test
-	@SuppressWarnings("unchecked")
-	public void cancelled() {
-		AtomicReference<FluxZip.ZipSingleCoordinator> ref = new AtomicReference<>();
+	Flux<Integer> scenario_backpressuredThenCancel() {
+		return Flux.just(1, 2, 3)
+		           .flatMap(f -> Flux.range(1, 10)
+		                             .delayMillis(10L))
+		           .hide();
+	}
 
-		StepVerifier.create(Flux.zip(obj -> (int) obj[0] + (int) obj[1] + (int) obj[2],
-				1,
-				Flux.just(1, 2),
-				Flux.defer(() -> {
-					ref.get()
-					   .cancel();
-					return Flux.just(3);
-				}),
-				Flux.just(3))
-		                        .doOnSubscribe(s -> {
-			                        assertThat(s instanceof FluxZip.ZipSingleCoordinator).isTrue();
-			                        ref.set((FluxZip.ZipSingleCoordinator) s);
-			                        assertInnerSubscriberBefore(ref.get());
-		                        }), 0)
-		            .then(() -> assertThat(ref.get()
-		                                      .getCapacity()).isEqualTo(3))
-		            .then(() -> assertThat(ref.get()
-		                                      .getPending()).isEqualTo(1))
-		            .then(() -> assertThat(ref.get()
-		                                      .upstreams()).hasSize(3))
+	@Test
+	public void backpressuredThenCancel() {
+		StepVerifier.withVirtualTime(this::scenario_backpressuredThenCancel, 0)
+		            .thenRequest(2)
+		            .thenAwait(Duration.ofSeconds(1))
+		            .expectNext(1, 1)
+		            .thenAwait(Duration.ofSeconds(1))
+		            .thenRequest(1)
+		            .expectNext(2)
 		            .thenCancel()
 		            .verify();
-
-		assertInnerSubscriber(ref.get());
 	}
 
-	@SuppressWarnings("unchecked")
-	void assertInnerSubscriberBefore(FluxZip.ZipSingleCoordinator c) {
-		FluxZip.ZipSingleSubscriber s = (FluxZip.ZipSingleSubscriber) c.upstreams()
-		                                                               .next();
-
-		assertThat(s.isStarted()).isTrue();
-		assertThat(s.isTerminated()).isFalse();
-		assertThat(s.upstream()).isNull();
-		assertThat(s.getCapacity()).isEqualTo(1L);
-		assertThat(s.getPending()).isEqualTo(1L);
-		assertThat(s.isCancelled()).isFalse();
-	}
-
-	@SuppressWarnings("unchecked")
-	void assertInnerSubscriber(FluxZip.ZipSingleCoordinator c) {
-		FluxZip.ZipSingleSubscriber s = (FluxZip.ZipSingleSubscriber) c.upstreams()
-		                                                               .next();
-
+	void assertBeforeOnSubscribeState(Trackable s) {
 		assertThat(s.isStarted()).isFalse();
-		assertThat(s.isTerminated()).isTrue();
-		assertThat(s.upstream()).isNotNull();
+		assertThat(s.isTerminated()).isFalse();
 		assertThat(s.getCapacity()).isEqualTo(1);
-		assertThat(s.getPending()).isEqualTo(-1L);
-		assertThat(s.isCancelled()).isTrue();
-
-		Hooks.onNextDropped(v -> {
-		});
-		s.onNext(0);
-		Hooks.resetOnNextDropped();
-	}
-
-	@Test
-	@SuppressWarnings("unchecked")
-	public void cancelledHide() {
-		AtomicReference<FluxZip.ZipCoordinator> ref = new AtomicReference<>();
-
-		StepVerifier.create(Flux.zip(obj -> (int) obj[0] + (int) obj[1] + (int) obj[2],
-				123,
-				Flux.just(1, 2)
-				    .hide(),
-				Flux.defer(() -> {
-					ref.get()
-					   .cancel();
-					return Flux.just(3);
-				}),
-				Flux.just(3)
-				    .hide())
-		                        .doOnSubscribe(s -> {
-			                        assertThat(s instanceof FluxZip.ZipCoordinator).isTrue();
-			                        ref.set((FluxZip.ZipCoordinator) s);
-			                        assertInnerSubscriberBefore(ref.get());
-		                        }), 0)
-		            .then(() -> assertThat(ref.get()
-		                                      .getCapacity()).isEqualTo(3))
-		            .then(() -> assertThat(ref.get()
-		                                      .getPending()).isEqualTo(1))
-		            .then(() -> assertThat(ref.get()
-		                                      .upstreams()).hasSize(3))
-		            .then(() -> assertThat(ref.get()
-		                                      .getError()).isNull())
-		            .then(() -> assertThat(ref.get()
-		                                      .requestedFromDownstream()).isEqualTo(0))
-		            .thenCancel()
-		            .verify();
-
-		assertInnerSubscriber(ref.get());
-	}
-
-	@Test
-	@SuppressWarnings("unchecked")
-	public void delayedCancelledHide() {
-		AtomicReference<FluxZip.ZipCoordinator> ref = new AtomicReference<>();
-
-		StepVerifier.create(Flux.zip(obj -> (int) obj[0] + (int) obj[1] + (int) obj[2],
-				123,
-				Flux.just(1, 2)
-				    .hide(),
-				Flux.defer(() -> {
-					ref.get()
-					   .cancel();
-					assertThat(ref.get()
-					              .getPending()).isEqualTo(1);
-					assertThat(ref.get()
-					              .isCancelled()).isTrue();
-					assertThat(ref.get()
-					              .isTerminated()).isFalse();
-					return Flux.just(3);
-				}),
-				Flux.just(3)
-				    .hide())
-		                        .doOnSubscribe(s -> {
-			                        assertThat(s instanceof FluxZip.ZipCoordinator).isTrue();
-			                        ref.set((FluxZip.ZipCoordinator) s);
-			                        assertInnerSubscriberBefore(ref.get());
-		                        }), 0)
-		            .then(() -> assertThat(ref.get()
-		                                      .getCapacity()).isEqualTo(3))
-		            .then(() -> assertThat(ref.get()
-		                                      .getPending()).isEqualTo(1))
-		            .then(() -> assertThat(ref.get()
-		                                      .upstreams()).hasSize(3))
-		            .then(() -> assertThat(ref.get()
-		                                      .getError()).isNull())
-		            .then(() -> assertThat(ref.get()
-		                                      .requestedFromDownstream()).isEqualTo(0))
-		            .thenCancel()
-		            .verify();
-
-		assertInnerSubscriber(ref.get());
-	}
-
-	@SuppressWarnings("unchecked")
-	void assertInnerSubscriberBefore(FluxZip.ZipCoordinator c) {
-		FluxZip.ZipInner s = (FluxZip.ZipInner) c.upstreams()
-		                                         .next();
-
-		assertThat(s.isStarted()).isTrue();
-		assertThat(s.isTerminated()).isFalse();
-		assertThat(s.upstream()).isNull();
-		assertThat(s.getCapacity()).isEqualTo(123);
-		assertThat(s.getPending()).isEqualTo(-1L);
-		assertThat(s.limit()).isEqualTo(93);
-		assertThat(s.expectedFromUpstream()).isEqualTo(0);
-		assertThat(s.downstream()).isNull();
+		assertThat(s.getPending()).isEqualTo(-1);
+		assertThat(s.limit()).isEqualTo(-1);
+		assertThat(s.expectedFromUpstream()).isEqualTo(-1);
 		assertThat(s.isCancelled()).isFalse();
 	}
 
-	@SuppressWarnings("unchecked")
-	void assertInnerSubscriber(FluxZip.ZipCoordinator c) {
-		FluxZip.ZipInner s = (FluxZip.ZipInner) c.upstreams()
-		                                         .next();
-
+	void assertBeforeOnSubscribeInnerState(Trackable s) {
 		assertThat(s.isStarted()).isFalse();
 		assertThat(s.isTerminated()).isFalse();
-		assertThat(s.upstream()).isNotNull();
-		assertThat(s.getCapacity()).isEqualTo(123);
-		assertThat(s.getPending()).isEqualTo(1);
-		assertThat(s.limit()).isEqualTo(93);
+		assertThat(s.getCapacity()).isEqualTo(32);
+		assertThat(s.getPending()).isEqualTo(-1);
+		assertThat(s.limit()).isEqualTo(24);
 		assertThat(s.expectedFromUpstream()).isEqualTo(0);
-		assertThat(s.downstream()).isNull();
 		assertThat(s.isCancelled()).isFalse();
 	}
 
+	void assertAfterOnSubscribeState(Trackable s) {
+		assertThat(s.isStarted()).isTrue();
+		assertThat(s.isTerminated()).isFalse();
+		assertThat(s.isCancelled()).isFalse();
+	}
+
+	void assertAfterOnSubscribeInnerState(MultiReceiver s) {
+		assertThat(s.upstreamCount()).isEqualTo(1);
+		assertThat(s.upstreams().next()).isNotNull();
+	}
+
+	@Test
+	public void assertOnSubscribeState() {
+		StepVerifier.create(Flux.from(s -> {
+			assertBeforeOnSubscribeState((FluxFlatMap.FlatMapMain) s);
+			s.onSubscribe(Operators.emptySubscription());
+			assertAfterOnSubscribeState((FluxFlatMap.FlatMapMain) s);
+			s.onNext(1);
+			s.onComplete();
+		})
+		                        .flatMap(f -> Flux.from(s -> {
+			                        assertBeforeOnSubscribeInnerState((FluxFlatMap.FlatMapInner) s);
+			                        s.onSubscribe(Operators.emptySubscription());
+			                        assertAfterOnSubscribeState((FluxFlatMap.FlatMapInner) s);
+			                        assertAfterOnSubscribeInnerState(((FluxFlatMap.FlatMapInner) s).downstream());
+			                        s.onNext(f);
+			                        s.onComplete();
+		                        }), 1), 1)
+		            .expectNext(1)
+		            .verifyComplete();
+	}
 }
