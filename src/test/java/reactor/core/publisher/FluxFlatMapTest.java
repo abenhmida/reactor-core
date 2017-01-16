@@ -557,10 +557,10 @@ public class FluxFlatMapTest {
 	public void prematureCancel2() {
 		StepVerifier.create(Flux.range(1, 10000)
 		                        .flatMap(Flux::just, 2)
-		                        .cancelOn(Schedulers.single()), 3)
+		                        .cancelOn(Schedulers.single()), 1)
 		            .expectNext(1)
 		            .thenRequest(2)
-		            .expectNext(2)
+		            .expectNext(2, 3)
 		            .thenCancel()
 		            .verify();
 	}
